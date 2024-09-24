@@ -1,7 +1,6 @@
 package sqlite
 
 import (
-	"errors"
 	gosql "database/sql"
 
 	_ "modernc.org/sqlite"
@@ -19,8 +18,8 @@ type Client struct {
 
 // Options are the options for the sqlite client.
 type Options struct {
-	// Filename
-	Filename string
+	// Path
+	Path string
 	// Name of the table in which the key-value pairs are stored.
 	// Optional ("Item" by default).
 	TableName string
@@ -31,9 +30,9 @@ type Options struct {
 
 // DefaultOptions is an Options object with default values.
 var DefaultOptions = Options{
-	Filename:           "sqlite.db",
-	TableName:          defaultDBname,
-	Codec:              encoding.JSON,
+	Path:      "sqlite.db",
+	TableName: defaultDBname,
+	Codec:     encoding.JSON,
 }
 
 // NewClient creates a new sqlite client.
@@ -49,13 +48,31 @@ func NewClient(options Options) (Client, error) {
 	if options.Codec == nil {
 		options.Codec = DefaultOptions.Codec
 	}
+	if options.Path == "" {
+		options.Path = DefaultOptions.Path
+	}
 
-	db, err := gosql.Open("sqlite", options.Filename)
+	db, err := gosql.Open("sqlite", options.Path)
 	if err != nil {
 		return result, err
 	}
 
 	err = db.Ping()
+	if err != nil {
+		return result, err
+	}
+
+	const q = `
+	PRAGMA foreign_keys = ON;
+	PRAGMA synchronous = NORMAL;
+	PRAGMA journal_mode = 'WAL';
+	PRAGMA cache_size = -64000;
+	`
+
+	_, err = db.Exec(q)
+
+	db.SetMaxOpenConns(1)
+
 	if err != nil {
 		return result, err
 	}
@@ -98,76 +115,19 @@ func NewClient(options Options) (Client, error) {
 // Close closes the client.
 // It must be called to make sure that all open transactions finish and to release all DB resources.
 func (c Client) Close() error {
-	return c.C.Close()
+	return c.Client.Close()
 }
 
 // Get retrieves the stored value for the given key.
 func (c Client) Get(k string, v any) (found bool, err error) {
-	if k == "" {
-		return false, errors.New("key must be longer than zero")
-	}
-	if v == nil {
-		return false, errors.New("value must not be nil")
-	}
-	if err != nil {
-		return false, err
-	}
-
-	data := make([]byte, 10000)
-
-	err = c.GetStmt.QueryRow(k).Scan(&data)
-
-	if err == gosql.ErrNoRows {
-		return false, nil
-	}
-	
-	if err != nil {
-		return false, err
-	}
-
-	return true, c.Codec.Unmarshal(data, v)
+	return c.Client.Get(k, v)
 }
 
 // Delete deletes the stored value for the given key.
 func (c Client) Delete(k string) error {
-	if k == "" {
-		return errors.New("key must be longer than zero")
-	}
-	tx, err := c.C.Begin() // Start a transaction
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback() // Ensure rollback on error
-
-	tx.Stmt(c.DeleteStmt).Exec(k)
-
-	return tx.Commit() // Commit the transaction
+	return c.Client.Delete(k)
 }
 
 func (c Client) Set(k string, v any) error {
-	if k == "" {
-		return errors.New("key must be longer than zero")
-	}
-	if v == nil {
-		return errors.New("value must not be nil")
-	}
-	tx, err := c.C.Begin() // Start a transaction
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback() // Ensure rollback on error
-
-	data, err := c.Codec.Marshal(v)
-
-	if err != nil {
-		return err
-	}
-
-	_, err = tx.Stmt(c.UpsertStmt).Exec(k, data)
-
-	if err != nil {
-		return err
-	}
-
-	return tx.Commit() // Commit the transaction
+	return c.Client.Set(k, v)
 }
